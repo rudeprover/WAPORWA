@@ -1,108 +1,189 @@
 # -*- coding: utf-8 -*-
 """
-Created on Tue Jul 23 11:25:33 2019
+Dekadal Actual Evapotranspiration from WaPOR v3 (L1-AETI-D / L2-AETI-D)
 
-@author: ntr002
+This is a v3 replacement of the original v2-based AET_dekadal module.
+Note: In WaPOR v3, this is called AETI (Actual Evapotranspiration and Interception).
 """
-import WaPOR
-import requests
+
+from datetime import datetime, date
 import os
-from WaPOR import GIS_functions as gis
 import numpy as np
-import datetime
-np.warnings.filterwarnings('ignore')
+from osgeo import gdal
 
-def main(Dir, Startdate='2009-01-01', Enddate='2018-12-31', 
-         latlim=[-40.05, 40.05], lonlim=[-30.5, 65.05],level=1, 
-         version = 2, Waitbar = 1):
-    """
-    This function downloads dekadal Actual Evapotranaspiration and Interception data
+import WaPOR
+from WaPOR import GIS_functions as gis
+from WaPOR.waporv3_api import base_url, collect_responses
 
-    Keyword arguments:
-    Dir -- 'C:/file/to/path/'
-    Startdate -- 'yyyy-mm-dd'
-    Enddate -- 'yyyy-mm-dd'
-    latlim -- [ymin, ymax] (values must be between -40.05 and 40.05)
-    lonlim -- [xmin, xmax] (values must be between -30.05 and 65.05)
-    """
-    print('\nDownload dekadal WaPOR Actual Evapotranaspiration and Interception\
-          data for the period %s till %s' %(Startdate, Enddate))
 
-    # Download data
-    WaPOR.API.version=version
-    catalog=WaPOR.API.getCatalog()
-    bbox=[lonlim[0],latlim[0],lonlim[1],latlim[1]]
+SCALE_FACTOR = 0.1  # multiply raw values to get mm
+
+
+def _parse_date_from_code(code):
+    """Extract a date from a WaPOR v3 raster code."""
+    token = code.split('.')[-1]
+    token = token.split('_')[-1]
+
+    # Handle dekadal format
+    if 'D' in token[-2:]:
+        token = token[:-3]
     
-    if level==1:
-        cube_code='L1_AETI_D'
-    elif level==2:
-        cube_code='L2_AETI_D'
-    elif level==3:
-        print('Level 3 data only available in some areas with specific data cube code below: ')        
-        for i,row in catalog.iterrows():            
-            if ('L3_AETI' in row['code'])&('_D' in row['code']):
-                print('%s: %s'%(row['caption'],row['code']))
-        cube_code=input('Insert Level 3 cube code for the selected area: ')
+    for fmt in ("%Y-%m-%d", "%Y-%m", "%Y"):
+        try:
+            dt = datetime.strptime(token, fmt)
+            if fmt == "%Y":
+                return date(dt.year, 1, 1)
+            elif fmt == "%Y-%m":
+                return date(dt.year, dt.month, 1)
+            else:
+                return dt.date()
+        except ValueError:
+            continue
+    return None
+
+
+def main(Dir,
+         Startdate='2018-01-01',
+         Enddate='2024-12-31',
+         latlim=[-40.05, 40.05],
+         lonlim=[-30.5, 65.05],
+         level=1,
+         version=3,
+         Waitbar=1):
+    """
+    Download dekadal WaPOR v3 Actual ET (AETI) for given period and bbox.
+
+    Parameters
+    ----------
+    Dir : str
+        Root directory where data will be stored.
+    Startdate, Enddate : 'YYYY-MM-DD'
+        Date range (inclusive).
+    latlim, lonlim : [min, max]
+        Latitude and longitude bounds of the area of interest.
+    level : int
+        1 for L1-AETI-D (continental), 2 for L2-AETI-D (national)
+    version : int
+        Kept for backward compatibility (ignored, always uses v3).
+    Waitbar : int (0 or 1)
+        If 1, prints a simple textual progress bar.
+    """
+
+    if level == 1:
+        mapset_code = 'L1-AETI-D'
+    elif level == 2:
+        mapset_code = 'L2-AETI-D'
     else:
-        print('Invalid Level')
-    
-    try:
-        cube_info=WaPOR.API.getCubeInfo(cube_code)
-        multiplier=cube_info['measure']['multiplier']
-    except:
-        print('ERROR: Cannot get cube info. Check if WaPOR version has cube %s'%(cube_code))
+        print('This module only supports level 1 and level 2 data.')
         return None
-    time_range='{0},{1}'.format(Startdate,Enddate)
+
+    print(f"\nDownload dekadal WaPOR v3 Actual ET (AETI) data ({mapset_code}) "
+          f"for the period {Startdate} till {Enddate}")
+
+    start_dt = datetime.strptime(Startdate, "%Y-%m-%d").date()
+    end_dt = datetime.strptime(Enddate, "%Y-%m-%d").date()
+
+    # List all rasters for the mapset
+    mapset_url = f"{base_url}/{mapset_code}/rasters"
+
     try:
-        df_avail=WaPOR.API.getAvailData(cube_code,time_range=time_range)
-    except:
-        print('ERROR: cannot get list of available data')
+        all_rasters = collect_responses(mapset_url,
+                                        info=["code", "downloadUrl"])
+    except Exception as e:
+        print("ERROR: cannot get list of available data from WaPOR v3")
+        print(e)
         return None
+
+    # Filter rasters by date
+    selected = []
+    for code, url in all_rasters:
+        dt = _parse_date_from_code(code)
+        if dt is None:
+            continue
+        if (dt >= start_dt) and (dt <= end_dt):
+            selected.append((dt, code, url))
+
+    if len(selected) == 0:
+        print("No rasters found within requested date range.")
+        return None
+
+    selected.sort(key=lambda x: x[0])
+
+    # Prepare output directory
+    out_dir = os.path.join(Dir, mapset_code)
+    if not os.path.exists(out_dir):
+        os.makedirs(out_dir)
+
+    # Progress bar
     if Waitbar == 1:
-        import WaPOR.WaitbarConsole as WaitbarConsole
-        total_amount = len(df_avail)
+        try:
+            import WaPOR.WaitbarConsole as WaitbarConsole
+        except ImportError:
+            WaitbarConsole = None
+        total_amount = len(selected)
         amount = 0
-        WaitbarConsole.printWaitBar(amount, total_amount, prefix = 'Progress:', suffix = 'Complete', length = 50)
+        if WaitbarConsole is not None:
+            WaitbarConsole.printWaitBar(
+                amount, total_amount,
+                prefix='Progress:',
+                suffix='Complete',
+                length=50
+            )
 
-    Dir=os.path.join(Dir,cube_code)
-    if not os.path.exists(Dir):
-        os.makedirs(Dir)
-        
-    for index,row in df_avail.iterrows():  
-        ### get download url
-        download_url=WaPOR.API.getCropRasterURL(bbox,cube_code,
-                                               row['time_code'],
-                                               row['raster_id'],
-                                               WaPOR.API.Token,
-                                               print_job=False)      
-              
-        filename='WAPOR.v%s_mm-dekad-1_%s.tif' %(version,row['raster_id'])
-        outfilename=os.path.join(Dir,filename)       
-        download_file=os.path.join(Dir,'{0}.tif'.format(row['raster_id']))
-        ### Download raster file
-        resp=requests.get(download_url)         
-        open(download_file,'wb').write(resp.content) 
-        
-        ### number of days
-        timestr=row['time_code']
-        startdate=datetime.datetime.strptime(timestr[1:11],'%Y-%m-%d')
-        enddate=datetime.datetime.strptime(timestr[12:22],'%Y-%m-%d')
-        ndays=(enddate.timestamp()-startdate.timestamp())/86400
-        
-        ### correct raster with multiplier and number of days in dekad
-        driver, NDV, xsize, ysize, GeoT, Projection= gis.GetGeoInfo(download_file)
-        Array = gis.OpenAsArray(download_file,nan_values=True)
-        Array=np.where(Array<0,0,Array) #mask out flagged value -9998
-        Array=np.where(Array==NDV-1,0,Array)
-        CorrectedArray=Array*multiplier*ndays
-        gis.CreateGeoTiff(outfilename,CorrectedArray,
+    # Loop over rasters
+    bbox = [lonlim[0], latlim[0], lonlim[1], latlim[1]]
+
+    for dt, code, url in selected:
+        raster_id = code.split('.')[-1] if '.' in code else code
+        fname = f'AETI_WAPOR.v3_level{level}_mm-dekad-1_{raster_id}.tif'
+        out_path = os.path.join(out_dir, fname)
+
+        if os.path.exists(out_path):
+            print("File exists, skipping:", fname)
+            if Waitbar == 1 and 'amount' in locals():
+                amount += 1
+                if WaitbarConsole is not None:
+                    WaitbarConsole.printWaitBar(
+                        amount, total_amount,
+                        prefix='Progress:',
+                        suffix='Complete',
+                        length=50
+                    )
+            continue
+
+        print("Downloading + cropping:", code)
+
+        tmp_path = os.path.join(out_dir, "_tmp_{}.tif".format(code.replace('.', '_')))
+
+        warp_opts = gdal.WarpOptions(
+            outputBounds=bbox,
+            dstNodata=-9999
+        )
+        gdal.Warp(tmp_path, f"/vsicurl/{url}", options=warp_opts)
+
+        # Read, scale, save
+        driver, NDV, xsize, ysize, GeoT, Projection = gis.GetGeoInfo(tmp_path)
+        arr = gis.OpenAsArray(tmp_path, nan_values=True)
+
+        arr = np.where(np.isnan(arr), NDV, arr)
+        arr = np.where(arr < 0, 0, arr)
+        arr = arr * SCALE_FACTOR
+
+        gis.CreateGeoTiff(out_path, arr.astype("float32"),
                           driver, NDV, xsize, ysize, GeoT, Projection)
-        os.remove(download_file)        
 
-        if Waitbar == 1:                 
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+        if Waitbar == 1 and 'amount' in locals():
             amount += 1
-            WaitbarConsole.printWaitBar(amount, total_amount, 
-                                        prefix = 'Progress:', 
-                                        suffix = 'Complete', 
-                                        length = 50)
-    
+            if WaitbarConsole is not None:
+                WaitbarConsole.printWaitBar(
+                    amount, total_amount,
+                    prefix='Progress:',
+                    suffix='Complete',
+                    length=50
+                )
+
+    print(f"\nFinished downloading WaPOR v3 dekadal Actual ET ({mapset_code})")
+    return out_dir

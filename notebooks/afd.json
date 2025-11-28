@@ -1,0 +1,749 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# WaPOR v3 Data Collection and Preparation\n",
+    "This notebook downloads WaPOR v3 data and prepares it for water accounting analysis.\n",
+    "\n",
+    "**Key updates in v3:**\n",
+    "- No API token required\n",
+    "- Direct COG-based downloads via GDAL\n",
+    "- Faster and more reliable data access"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 1. Import Functions and Setup Paths"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import os\n",
+    "import sys\n",
+    "import glob\n",
+    "import pandas as pd\n",
+    "import numpy as np\n",
+    "import calendar\n",
+    "from osgeo import gdal\n",
+    "import osr\n",
+    "\n",
+    "# Add WAPORWA modules to path\n",
+    "modules_path = r'D:\\Papers and Journals\\WAPORWA\\modules'  # Change to your modules path\n",
+    "sys.path.insert(0, modules_path)\n",
+    "\n",
+    "# Import WaPOR v3 modules\n",
+    "import WaPOR\n",
+    "from WaPOR import GIS_functions as gis\n",
+    "\n",
+    "# Import WA modules\n",
+    "import WA\n",
+    "from WA.pickle_basin import pickle_in, pickle_out\n",
+    "\n",
+    "print(\"✓ Modules imported successfully\")\n",
+    "print(f\"✓ WaPOR module location: {WaPOR.__file__}\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 2. Define Basin Extent and Parameters"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# =============================================================================\n",
+    "# CONFIGURATION - Update these paths for your basin\n",
+    "# =============================================================================\n",
+    "\n",
+    "# Basin shapefile path\n",
+    "BASIN_SHP = r\"D:\\Papers and Journals\\WAPORWA\\data\\Litani\\BasinLitani.shp\"\n",
+    "\n",
+    "# Output folder for WaPOR data\n",
+    "INPUT_FOLDER = r\"D:\\Papers and Journals\\WAPORWA\\data\\Litani\\Input\"\n",
+    "\n",
+    "# Main directory for processed data\n",
+    "MAIN_DIR = r\"D:\\Papers and Journals\\WAPORWA\\data\\Litani\\Main\"\n",
+    "\n",
+    "# Global datasets\n",
+    "GLOBAL_GRAND_RESERVOIR = r\"D:\\Papers and Journals\\WAPORWA\\data\\Global\\GRanD\\GRanD_reservoirs_v1_1_fixed.shp\"\n",
+    "WDPA_SHAPEFILE = r\"D:\\Papers and Journals\\WAPORWA\\data\\Global\\WDPA\\WDPA_CatIandII_17countries.shp\"\n",
+    "\n",
+    "# Date range for data download\n",
+    "START_DATE = '2018-01-01'\n",
+    "END_DATE = '2018-12-31'\n",
+    "\n",
+    "# WaPOR data level (1 = continental 300m, 2 = national 100m)\n",
+    "WAPOR_LEVEL = 2\n",
+    "\n",
+    "# Create output directories\n",
+    "os.makedirs(INPUT_FOLDER, exist_ok=True)\n",
+    "os.makedirs(MAIN_DIR, exist_ok=True)\n",
+    "\n",
+    "print(f\"✓ Configuration loaded\")\n",
+    "print(f\"  Basin: {os.path.basename(BASIN_SHP)}\")\n",
+    "print(f\"  Date range: {START_DATE} to {END_DATE}\")\n",
+    "print(f\"  WaPOR level: {WAPOR_LEVEL}\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 3. Extract Basin Bounding Box"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Load basin shapefile and extract bounding box\n",
+    "import shapefile\n",
+    "\n",
+    "shape = shapefile.Reader(BASIN_SHP)\n",
+    "xmin, ymin, xmax, ymax = shape.bbox\n",
+    "\n",
+    "print(\"Basin Bounding Box:\")\n",
+    "print(f\"  Longitude: {xmin:.6f} to {xmax:.6f}\")\n",
+    "print(f\"  Latitude:  {ymin:.6f} to {ymax:.6f}\")\n",
+    "\n",
+    "# Define lat/lon limits with buffer for different datasets\n",
+    "# Larger buffer for coarser resolution data (L1)\n",
+    "latlim_L1 = [ymin - 0.25, ymax + 0.25]\n",
+    "lonlim_L1 = [xmin - 0.25, xmax + 0.25]\n",
+    "\n",
+    "# Exact bbox for fine resolution data (L2)\n",
+    "latlim_L2 = [ymin, ymax]\n",
+    "lonlim_L2 = [xmin, xmax]\n",
+    "\n",
+    "print(f\"\\n✓ Bounding box extracted successfully\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 4. Download WaPOR v3 Data\n",
+    "\n",
+    "This section downloads all required WaPOR datasets using the new v3 API.\n",
+    "**Note:** No API token is required for WaPOR v3!"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### 4.1 Daily Precipitation (L1-PCP-E)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "print(\"=\"*80)\n",
+    "print(\"DOWNLOADING DAILY PRECIPITATION (L1-PCP-E)\")\n",
+    "print(\"=\"*80)\n",
+    "\n",
+    "WaPOR.PCP_daily(\n",
+    "    Dir=INPUT_FOLDER,\n",
+    "    Startdate=START_DATE,\n",
+    "    Enddate=END_DATE,\n",
+    "    latlim=latlim_L1,\n",
+    "    lonlim=lonlim_L1,\n",
+    "    version=3,  # Always uses v3\n",
+    "    Waitbar=1\n",
+    ")\n",
+    "\n",
+    "print(\"\\n✓ Daily precipitation download complete\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### 4.2 Monthly Precipitation (L1-PCP-M)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "print(\"=\"*80)\n",
+    "print(\"DOWNLOADING MONTHLY PRECIPITATION (L1-PCP-M)\")\n",
+    "print(\"=\"*80)\n",
+    "\n",
+    "WaPOR.PCP_monthly(\n",
+    "    Dir=INPUT_FOLDER,\n",
+    "    Startdate=START_DATE,\n",
+    "    Enddate=END_DATE,\n",
+    "    latlim=latlim_L1,\n",
+    "    lonlim=lonlim_L1,\n",
+    "    version=3,\n",
+    "    Waitbar=1\n",
+    ")\n",
+    "\n",
+    "print(\"\\n✓ Monthly precipitation download complete\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### 4.3 Monthly Reference Evapotranspiration (L1/L2-RET-M)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "print(\"=\"*80)\n",
+    "print(f\"DOWNLOADING MONTHLY REFERENCE ET (L{WAPOR_LEVEL}-RET-M)\")\n",
+    "print(\"=\"*80)\n",
+    "\n",
+    "# Use appropriate bbox based on level\n",
+    "latlim_use = latlim_L2 if WAPOR_LEVEL == 2 else latlim_L1\n",
+    "lonlim_use = lonlim_L2 if WAPOR_LEVEL == 2 else lonlim_L1\n",
+    "\n",
+    "WaPOR.RET_monthly(\n",
+    "    Dir=INPUT_FOLDER,\n",
+    "    Startdate=START_DATE,\n",
+    "    Enddate=END_DATE,\n",
+    "    latlim=latlim_use,\n",
+    "    lonlim=lonlim_use,\n",
+    "    level=WAPOR_LEVEL,\n",
+    "    version=3,\n",
+    "    Waitbar=1\n",
+    ")\n",
+    "\n",
+    "print(\"\\n✓ Monthly reference ET download complete\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### 4.4 Monthly Actual Evapotranspiration (L1/L2-AETI-M)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "print(\"=\"*80)\n",
+    "print(f\"DOWNLOADING MONTHLY ACTUAL ET (L{WAPOR_LEVEL}-AETI-M)\")\n",
+    "print(\"=\"*80)\n",
+    "\n",
+    "WaPOR.AET_monthly(\n",
+    "    Dir=INPUT_FOLDER,\n",
+    "    Startdate=START_DATE,\n",
+    "    Enddate=END_DATE,\n",
+    "    latlim=latlim_L2 if WAPOR_LEVEL == 2 else latlim_L1,\n",
+    "    lonlim=lonlim_L2 if WAPOR_LEVEL == 2 else lonlim_L1,\n",
+    "    level=WAPOR_LEVEL,\n",
+    "    version=3,\n",
+    "    Waitbar=1\n",
+    ")\n",
+    "\n",
+    "print(\"\\n✓ Monthly actual ET download complete\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### 4.5 Dekadal Interception (L1/L2-I-D)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "print(\"=\"*80)\n",
+    "print(f\"DOWNLOADING DEKADAL INTERCEPTION (L{WAPOR_LEVEL}-I-D)\")\n",
+    "print(\"=\"*80)\n",
+    "\n",
+    "WaPOR.I_dekadal(\n",
+    "    Dir=INPUT_FOLDER,\n",
+    "    Startdate=START_DATE,\n",
+    "    Enddate=END_DATE,\n",
+    "    latlim=latlim_L2 if WAPOR_LEVEL == 2 else latlim_L1,\n",
+    "    lonlim=lonlim_L2 if WAPOR_LEVEL == 2 else lonlim_L1,\n",
+    "    level=WAPOR_LEVEL,\n",
+    "    version=3,\n",
+    "    Waitbar=1\n",
+    ")\n",
+    "\n",
+    "print(\"\\n✓ Dekadal interception download complete\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### 4.6 Annual Land Cover Classification (L1/L2-LCC-A)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "print(\"=\"*80)\n",
+    "print(f\"DOWNLOADING ANNUAL LAND COVER (L{WAPOR_LEVEL}-LCC-A)\")\n",
+    "print(\"=\"*80)\n",
+    "\n",
+    "WaPOR.LCC_yearly(\n",
+    "    Dir=INPUT_FOLDER,\n",
+    "    Startdate=START_DATE,\n",
+    "    Enddate=END_DATE,\n",
+    "    latlim=latlim_L2 if WAPOR_LEVEL == 2 else latlim_L1,\n",
+    "    lonlim=lonlim_L2 if WAPOR_LEVEL == 2 else lonlim_L1,\n",
+    "    level=WAPOR_LEVEL,\n",
+    "    version=3,\n",
+    "    Waitbar=1\n",
+    ")\n",
+    "\n",
+    "print(\"\\n✓ Annual land cover download complete\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### 4.7 Download Summary"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "print(\"\\n\" + \"=\"*80)\n",
+    "print(\"DOWNLOAD SUMMARY\")\n",
+    "print(\"=\"*80)\n",
+    "\n",
+    "# Check downloaded data\n",
+    "mapsets = [\n",
+    "    'L1-PCP-E',\n",
+    "    'L1-PCP-M',\n",
+    "    f'L{WAPOR_LEVEL}-RET-M',\n",
+    "    f'L{WAPOR_LEVEL}-AETI-M',\n",
+    "    f'L{WAPOR_LEVEL}-I-D',\n",
+    "    f'L{WAPOR_LEVEL}-LCC-A'\n",
+    "]\n",
+    "\n",
+    "for mapset in mapsets:\n",
+    "    mapset_dir = os.path.join(INPUT_FOLDER, mapset)\n",
+    "    if os.path.exists(mapset_dir):\n",
+    "        n_files = len(glob.glob(os.path.join(mapset_dir, '*.tif')))\n",
+    "        print(f\"✓ {mapset:20s}: {n_files:4d} files\")\n",
+    "    else:\n",
+    "        print(f\"✗ {mapset:20s}: Directory not found\")\n",
+    "\n",
+    "print(\"\\n✓ All WaPOR v3 data downloads complete!\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 5. Reclassify LCC to LUWA\n",
+    "\n",
+    "Convert WaPOR Land Cover Classification to Land Use for Water Accounting (LUWA) classes."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "from WA.LCC_to_LUWA import Rasterize_shape_basin, Adjust_GRaND_reservoir, LCC_to_LUWA\n",
+    "\n",
+    "print(\"=\"*80)\n",
+    "print(\"RECLASSIFYING LCC TO LUWA\")\n",
+    "print(\"=\"*80)\n",
+    "\n",
+    "# Define paths\n",
+    "LCC_FOLDER = os.path.join(INPUT_FOLDER, f'L{WAPOR_LEVEL}-LCC-A')\n",
+    "LCC_fhs = sorted(glob.glob(os.path.join(LCC_FOLDER, '*.tif')))\n",
+    "\n",
+    "if len(LCC_fhs) == 0:\n",
+    "    print(f\"ERROR: No LCC files found in {LCC_FOLDER}\")\n",
+    "else:\n",
+    "    print(f\"Found {len(LCC_fhs)} LCC files to process\")\n",
+    "    \n",
+    "    # Use first LCC file as template\n",
+    "    WaPOR_LCC = LCC_fhs[0]\n",
+    "    \n",
+    "    # Optional: Adjust reservoirs (set to None if not needed)\n",
+    "    Resrv_to_Lake = None  # GeoTIFF of reservoirs that are actually natural lakes\n",
+    "    Lake_to_Reserv = None  # GeoTIFF of natural lakes that are actually reservoirs"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### 5.1 Create Reservoir Raster Map"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "print(\"\\nCreating reservoir raster map...\")\n",
+    "\n",
+    "# Create output directory\n",
+    "Reservoir_dir = os.path.join(MAIN_DIR, 'Reservoir')\n",
+    "os.makedirs(Reservoir_dir, exist_ok=True)\n",
+    "\n",
+    "Basin_Reservoir_tif = os.path.join(Reservoir_dir, 'Reservoir_basin.tif')\n",
+    "\n",
+    "# Adjust reservoir if custom shapefiles provided\n",
+    "if (Resrv_to_Lake is not None) and (Lake_to_Reserv is not None):\n",
+    "    print(\"  Adjusting reservoirs with custom classifications...\")\n",
+    "    Adjust_GRaND_reservoir(\n",
+    "        Basin_Reservoir_tif,\n",
+    "        WaPOR_LCC,\n",
+    "        GLOBAL_GRAND_RESERVOIR,\n",
+    "        Resrv_to_Lake,\n",
+    "        Lake_to_Reserv\n",
+    "    )\n",
+    "else:\n",
+    "    print(\"  Using standard GRanD reservoir classification...\")\n",
+    "    Rasterize_shape_basin(\n",
+    "        GLOBAL_GRAND_RESERVOIR,\n",
+    "        WaPOR_LCC,\n",
+    "        Basin_Reservoir_tif\n",
+    "    )\n",
+    "\n",
+    "print(f\"✓ Reservoir map created: {Basin_Reservoir_tif}\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### 5.2 Create Protected Area Raster Map"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "print(\"\\nCreating protected area raster map...\")\n",
+    "\n",
+    "# Create output directory\n",
+    "Protected_dir = os.path.join(MAIN_DIR, 'Protected')\n",
+    "os.makedirs(Protected_dir, exist_ok=True)\n",
+    "\n",
+    "ProtectedArea_tif = os.path.join(Protected_dir, 'ProtectedArea_basin.tif')\n",
+    "\n",
+    "Rasterize_shape_basin(\n",
+    "    WDPA_SHAPEFILE,\n",
+    "    WaPOR_LCC,\n",
+    "    ProtectedArea_tif\n",
+    ")\n",
+    "\n",
+    "print(f\"✓ Protected area map created: {ProtectedArea_tif}\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### 5.3 Convert LCC to LUWA"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "print(\"\\nReclassifying LCC to LUWA...\")\n",
+    "\n",
+    "# Create output directory\n",
+    "LUWA_dir = os.path.join(MAIN_DIR, 'data', 'luwa')\n",
+    "os.makedirs(LUWA_dir, exist_ok=True)\n",
+    "\n",
+    "# Process each LCC file\n",
+    "for i, fh in enumerate(LCC_fhs, 1):\n",
+    "    print(f\"  [{i}/{len(LCC_fhs)}] Processing {os.path.basename(fh)}...\")\n",
+    "    LCC_to_LUWA(\n",
+    "        fh,\n",
+    "        LUWA_dir,\n",
+    "        ProtectedArea_tif,\n",
+    "        Basin_Reservoir_tif\n",
+    "    )\n",
+    "\n",
+    "n_luwa = len(glob.glob(os.path.join(LUWA_dir, '*.tif')))\n",
+    "print(f\"\\n✓ LUWA reclassification complete: {n_luwa} files created\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 6. Create Monthly Interception\n",
+    "\n",
+    "Aggregate dekadal interception data to monthly totals."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "print(\"=\"*80)\n",
+    "print(\"AGGREGATING DEKADAL INTERCEPTION TO MONTHLY\")\n",
+    "print(\"=\"*80)\n",
+    "\n",
+    "# Define input and output folders\n",
+    "Dekadal_I_folder = os.path.join(INPUT_FOLDER, f'L{WAPOR_LEVEL}-I-D')\n",
+    "Monthly_I_folder = os.path.join(INPUT_FOLDER, f'L{WAPOR_LEVEL}-I-M')\n",
+    "os.makedirs(Monthly_I_folder, exist_ok=True)\n",
+    "\n",
+    "# Get list of dekadal rasters\n",
+    "input_fhs = sorted(glob.glob(os.path.join(Dekadal_I_folder, '*.tif')))\n",
+    "print(f\"Found {len(input_fhs)} dekadal interception files\")\n",
+    "\n",
+    "if len(input_fhs) == 0:\n",
+    "    print(\"ERROR: No dekadal interception files found\")\n",
+    "else:\n",
+    "    # Get template for georeferencing\n",
+    "    driver, NDV, xsize, ysize, GeoT, Projection = gis.GetGeoInfo(input_fhs[0])\n",
+    "    \n",
+    "    # Get month dates\n",
+    "    month_dates = pd.date_range(START_DATE, END_DATE, freq='MS')\n",
+    "    print(f\"Processing {len(month_dates)} months...\\n\")\n",
+    "    \n",
+    "    # Process each month\n",
+    "    for idx, date in enumerate(month_dates, 1):\n",
+    "        year = date.year\n",
+    "        month = date.month\n",
+    "        \n",
+    "        print(f\"  [{idx}/{len(month_dates)}] Processing {year}-{month:02d}...\")\n",
+    "        \n",
+    "        # Find all files for this month by parsing filenames\n",
+    "        month_fhs = []\n",
+    "        for in_fh in input_fhs:\n",
+    "            fname = os.path.basename(in_fh)\n",
+    "            # Parse year-month from filename (format: WAPOR.v3_mm-dekad-1_YYYY-MM-D*.tif)\n",
+    "            if f'{year}-{month:02d}' in fname:\n",
+    "                month_fhs.append(in_fh)\n",
+    "        \n",
+    "        if len(month_fhs) == 0:\n",
+    "            print(f\"    WARNING: No dekadal files found for {year}-{month:02d}\")\n",
+    "            continue\n",
+    "        \n",
+    "        print(f\"    Found {len(month_fhs)} dekadal files for this month\")\n",
+    "        \n",
+    "        # Sum dekadal values to get monthly total\n",
+    "        SumArray = np.zeros((ysize, xsize), dtype=np.float32)\n",
+    "        for fh in month_fhs:\n",
+    "            Array = gis.OpenAsArray(fh, nan_values=True)\n",
+    "            SumArray = np.nansum([SumArray, Array], axis=0)\n",
+    "        \n",
+    "        # Save monthly file\n",
+    "        out_fh = os.path.join(\n",
+    "            Monthly_I_folder,\n",
+    "            f'I_WAPOR.v3_level{WAPOR_LEVEL}_mm-month-1_monthly_{year:04d}.{month:02d}.tif'\n",
+    "        )\n",
+    "        gis.CreateGeoTiff(out_fh, SumArray, driver, NDV, xsize, ysize, GeoT, Projection)\n",
+    "    \n",
+    "    n_monthly = len(glob.glob(os.path.join(Monthly_I_folder, '*.tif')))\n",
+    "    print(f\"\\n✓ Monthly interception aggregation complete: {n_monthly} files created\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 7. Create Monthly Rainy Days\n",
+    "\n",
+    "Calculate the number of rainy days per month from daily precipitation data.\n",
+    "A rainy day is defined as a day with precipitation > 0.201 mm."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "print(\"=\"*80)\n",
+    "print(\"CALCULATING MONTHLY RAINY DAYS\")\n",
+    "print(\"=\"*80)\n",
+    "\n",
+    "# Define paths\n",
+    "Data_Path_P = os.path.join(INPUT_FOLDER, 'L1-PCP-E')\n",
+    "Data_Path_RD = os.path.join(INPUT_FOLDER, 'Rainy_Days')\n",
+    "os.makedirs(Data_Path_RD, exist_ok=True)\n",
+    "\n",
+    "# Get list of daily precipitation files\n",
+    "daily_files = sorted(glob.glob(os.path.join(Data_Path_P, '*daily*.tif')))\n",
+    "print(f\"Found {len(daily_files)} daily precipitation files\\n\")\n",
+    "\n",
+    "if len(daily_files) == 0:\n",
+    "    print(\"ERROR: No daily precipitation files found\")\n",
+    "else:\n",
+    "    # Generate list of months to process\n",
+    "    Dates = pd.date_range(START_DATE, END_DATE, freq='MS')\n",
+    "    \n",
+    "    for idx, Date in enumerate(Dates, 1):\n",
+    "        year = Date.year\n",
+    "        month = Date.month\n",
+    "        daysinmonth = calendar.monthrange(year, month)[1]\n",
+    "        \n",
+    "        print(f\"  [{idx}/{len(Dates)}] Processing {year}-{month:02d} ({daysinmonth} days)...\")\n",
+    "        \n",
+    "        # Find all files for this month\n",
+    "        # Format: P_WAPOR.v3_mm-day-1_daily_YYYY.MM.DD.tif\n",
+    "        month_files = [f for f in daily_files if f'daily_{year}.{month:02d}.' in f]\n",
+    "        \n",
+    "        # Check if we have all days\n",
+    "        if len(month_files) != daysinmonth:\n",
+    "            print(f\"    WARNING: Expected {daysinmonth} files, found {len(month_files)}\")\n",
+    "            if len(month_files) == 0:\n",
+    "                continue\n",
+    "        \n",
+    "        # Initialize arrays\n",
+    "        first_file = month_files[0]\n",
+    "        driver, NDV, xsize, ysize, GeoT, Projection = gis.GetGeoInfo(first_file)\n",
+    "        P_Daily = np.zeros([len(month_files), ysize, xsize], dtype=np.float32)\n",
+    "        \n",
+    "        # Load all daily data for the month\n",
+    "        for i, file_path in enumerate(sorted(month_files)):\n",
+    "            Data = gis.OpenAsArray(file_path, nan_values=True)\n",
+    "            Data[Data < 0] = 0  # Remove negative values\n",
+    "            P_Daily[i, :, :] = Data\n",
+    "        \n",
+    "        # Define rainy days (precipitation > 0.201 mm)\n",
+    "        P_Daily_binary = np.where(P_Daily > 0.201, 1, 0)\n",
+    "        \n",
+    "        # Count number of rainy days\n",
+    "        RD_one_month = np.sum(P_Daily_binary, axis=0).astype(np.float32)\n",
+    "        \n",
+    "        # Save output\n",
+    "        Outname = os.path.join(\n",
+    "            Data_Path_RD,\n",
+    "            f'Rainy_Days_NumOfDays_monthly_{year:04d}.{month:02d}.01.tif'\n",
+    "        )\n",
+    "        gis.CreateGeoTiff(Outname, RD_one_month, driver, NDV, xsize, ysize, GeoT, Projection)\n",
+    "    \n",
+    "    n_rainy_days = len(glob.glob(os.path.join(Data_Path_RD, '*.tif')))\n",
+    "    print(f\"\\n✓ Monthly rainy days calculation complete: {n_rainy_days} files created\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 8. Final Summary"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "print(\"\\n\" + \"=\"*80)\n",
+    "print(\"FINAL PROCESSING SUMMARY\")\n",
+    "print(\"=\"*80)\n",
+    "\n",
+    "summary_data = {\n",
+    "    'Dataset': [],\n",
+    "    'Location': [],\n",
+    "    'Files': []\n",
+    "}\n",
+    "\n",
+    "# Check all output folders\n",
+    "check_folders = [\n",
+    "    ('Daily Precipitation', os.path.join(INPUT_FOLDER, 'L1-PCP-E')),\n",
+    "    ('Monthly Precipitation', os.path.join(INPUT_FOLDER, 'L1-PCP-M')),\n",
+    "    (f'Monthly Reference ET (L{WAPOR_LEVEL})', os.path.join(INPUT_FOLDER, f'L{WAPOR_LEVEL}-RET-M')),\n",
+    "    (f'Monthly Actual ET (L{WAPOR_LEVEL})', os.path.join(INPUT_FOLDER, f'L{WAPOR_LEVEL}-AETI-M')),\n",
+    "    (f'Dekadal Interception (L{WAPOR_LEVEL})', os.path.join(INPUT_FOLDER, f'L{WAPOR_LEVEL}-I-D')),\n",
+    "    (f'Monthly Interception (L{WAPOR_LEVEL})', os.path.join(INPUT_FOLDER, f'L{WAPOR_LEVEL}-I-M')),\n",
+    "    (f'Land Cover (L{WAPOR_LEVEL})', os.path.join(INPUT_FOLDER, f'L{WAPOR_LEVEL}-LCC-A')),\n",
+    "    ('LUWA', os.path.join(MAIN_DIR, 'data', 'luwa')),\n",
+    "    ('Rainy Days', os.path.join(INPUT_FOLDER, 'Rainy_Days')),\n",
+    "]\n",
+    "\n",
+    "for name, folder in check_folders:\n",
+    "    if os.path.exists(folder):\n",
+    "        n_files = len(glob.glob(os.path.join(folder, '*.tif')))\n",
+    "        summary_data['Dataset'].append(name)\n",
+    "        summary_data['Location'].append(folder)\n",
+    "        summary_data['Files'].append(n_files)\n",
+    "\n",
+    "# Create summary dataframe\n",
+    "df_summary = pd.DataFrame(summary_data)\n",
+    "print(\"\\n\")\n",
+    "print(df_summary.to_string(index=False))\n",
+    "\n",
+    "print(\"\\n\" + \"=\"*80)\n",
+    "print(\"✓ ALL PROCESSING COMPLETE!\")\n",
+    "print(\"=\"*80)\n",
+    "print(f\"\\nData ready for water accounting analysis!\")\n",
+    "print(f\"Input folder: {INPUT_FOLDER}\")\n",
+    "print(f\"Main folder:  {MAIN_DIR}\")"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.7.3"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 2
+}

@@ -1,90 +1,84 @@
 # -*- coding: utf-8 -*-
 """
-Created on Tue Jul 23 11:25:33 2019
+AET_monthly – WaPOR v3 compatibility wrapper
 
-@author: ntr002
+This module keeps the original WaPOR v2-style interface but internally
+delegates all work to the new WaPOR v3 implementation in WaPOR_v3.py.
+
+Usage (old style still works):
+    import WaPOR
+    WaPOR.AET_monthly(Dir=..., Startdate=..., Enddate=..., ...)
+
+Or:
+    from WaPOR import AET_monthly
+    AET_monthly.main(Dir=..., ...)
 """
-import WaPOR
-from datetime import datetime
-import requests
-import os
-from WaPOR import GIS_functions as gis
+
+from .WaPOR_v3 import AET_monthly as _AET_monthly
 
 
-def main(Dir, Startdate='2009-01-01', Enddate='2018-12-31', 
-         latlim=[-40.05, 40.05], lonlim=[-30.5, 65.05],level=1, 
-         version = 2, Waitbar = 1):
+def main(Dir,
+         Startdate='2009-01-01',
+         Enddate='2018-12-31',
+         latlim=[-40.05, 40.05],
+         lonlim=[-30.5, 65.05],
+         level=1,
+         version=3,
+         Waitbar=1):
     """
-    This function downloads monthly WaPOR AETI data
+    Download WaPOR v3 monthly actual evapotranspiration + interception (AETI).
 
-    Keyword arguments:
-    Dir -- 'C:/file/to/path/'
-    Startdate -- 'yyyy-mm-dd'
-    Enddate -- 'yyyy-mm-dd'
-    latlim -- [ymin, ymax] (values must be between -40.05 and 40.05)
-    lonlim -- [xmin, xmax] (values must be between -30.05 and 65.05)
+    Parameters
+    ----------
+    Dir : str
+        Output directory.
+    Startdate : str, optional
+        Start date in 'YYYY-MM-DD' format. Default '2009-01-01'.
+    Enddate : str, optional
+        End date in 'YYYY-MM-DD' format. Default '2018-12-31'.
+    latlim : list(float, float), optional
+        [ymin, ymax] latitude limits of the area of interest.
+    lonlim : list(float, float), optional
+        [xmin, xmax] longitude limits of the area of interest.
+    level : int, optional
+        1 -> L1-AETI-M (300 m, continental)
+        2 -> L2-AETI-M (100 m, national)
+    version : int, optional
+        WaPOR version. Only 3 is supported; other values are ignored with a
+        warning.
+    Waitbar : int, optional
+        1 to print progress to screen, 0 for silent.
+
+    Returns
+    -------
+    None
+        Files are written to disk in a subfolder:
+        <Dir>/<mapset_code>/Lx-AETI-M.YYYY-MM.tif
     """
-    print('\nDownload monthly WaPOR Actual Evapotranspiration data for the period %s till %s' %(Startdate, Enddate))
+    return _AET_monthly(
+        Dir=Dir,
+        Startdate=Startdate,
+        Enddate=Enddate,
+        latlim=latlim,
+        lonlim=lonlim,
+        level=level,
+        version=version,
+        Waitbar=Waitbar,
+    )
 
-    # Download data
-    WaPOR.API.version=version
-    catalog=WaPOR.API.getCatalog()
-    bbox=[lonlim[0],latlim[0],lonlim[1],latlim[1]]
-    
-    if level==1:
-        cube_code='L1_AETI_M'
-    elif level==2:
-        cube_code='L2_AETI_M'
-    else:
-        print('This module only support level 1 and level 2 data. For higher level, use WaPORAPI module')
-    
-    try:
-        cube_info=WaPOR.API.getCubeInfo(cube_code)
-        multiplier=cube_info['measure']['multiplier']
-    except:
-        print('ERROR: Cannot get cube info. Check if WaPOR version has cube L1_PCP_M')
-        return None
-    time_range='{0},{1}'.format(Startdate,Enddate)
-    try:
-        df_avail=WaPOR.API.getAvailData(cube_code,time_range=time_range)
-    except:
-        print('ERROR: cannot get list of available data')
-        return None
-    if Waitbar == 1:
-        import WaPOR.WaitbarConsole as WaitbarConsole
-        total_amount = len(df_avail)
-        amount = 0
-        WaitbarConsole.printWaitBar(amount, total_amount, prefix = 'Progress:', suffix = 'Complete', length = 50)
 
-    Dir=os.path.join(Dir,cube_code)
-    if not os.path.exists(Dir):
-        os.makedirs(Dir)
-        
-    for index,row in df_avail.iterrows():   
-        download_url=WaPOR.API.getCropRasterURL(bbox,cube_code,
-                                               row['time_code'],
-                                               row['raster_id'],
-                                               WaPOR.API.Token,
-                                               print_job=False)       
-        
-        Date=datetime.strptime(row['MONTH'], '%Y-%m')
-        filename='AET_WAPOR.v2.0_level%s_mm-month-1_monthly_%s.%02s.tif' %(level,Date.strftime('%Y'), Date.strftime('%m'))
-        outfilename=os.path.join(Dir,filename)       
-        download_file=os.path.join(Dir,'{0}.tif'.format(row['raster_id']))
-        #Download raster file
-        resp=requests.get(download_url) 
-        open(download_file,'wb').write(resp.content) 
-        driver, NDV, xsize, ysize, GeoT, Projection= gis.GetGeoInfo(download_file)
-        Array = gis.OpenAsArray(download_file,nan_values=True)
-        CorrectedArray=Array*multiplier
-        gis.CreateGeoTiff(outfilename,CorrectedArray,
-                          driver, NDV, xsize, ysize, GeoT, Projection)
-        os.remove(download_file)        
-
-        if Waitbar == 1:                 
-            amount += 1
-            WaitbarConsole.printWaitBar(amount, total_amount, 
-                                        prefix = 'Progress:', 
-                                        suffix = 'Complete', 
-                                        length = 50)
-    
+# Optional: simple CLI test
+if __name__ == "__main__":
+    print("Testing AET_monthly wrapper (WaPOR v3)...")
+    test_dir = r"D:\Temp\WaPOR_test_AET"
+    main(
+        Dir=test_dir,
+        Startdate="2018-01-01",
+        Enddate="2018-01-31",
+        latlim=[33.0, 34.0],
+        lonlim=[35.0, 36.0],
+        level=2,
+        version=3,
+        Waitbar=1,
+    )
+    print("Done.")

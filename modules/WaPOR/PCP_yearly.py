@@ -1,83 +1,141 @@
 # -*- coding: utf-8 -*-
 """
-Created on Tue Jul 23 11:25:33 2019
-
-@author: ntr002
+Yearly Precipitation from WaPOR v3 (L1-PCP-A)
+This script is based on your working PCP_monthly downloader.
 """
-import WaPOR
-from datetime import datetime
-import requests
+
+from datetime import datetime, date
 import os
+import numpy as np
+from osgeo import gdal
+import urllib.request
+
 from WaPOR import GIS_functions as gis
+from WaPOR.waporv3_api import base_url, collect_responses
 
 
-def main(Dir, Startdate='2009-01-01', Enddate='2018-12-31', 
-         latlim=[-40.05, 40.05], lonlim=[-30.5, 65.05], 
-         version = 2, Waitbar = 1):
-    """
-    This function downloads yearly WaPOR PCP data
+SCALE_FACTOR = 0.1  # Convert raw mm*10 to mm
 
-    Keyword arguments:
-    Dir -- 'C:/file/to/path/'
-    Startdate -- 'yyyy-mm-dd'
-    Enddate -- 'yyyy-mm-dd'
-    latlim -- [ymin, ymax] (values must be between -40.05 and 40.05)
-    lonlim -- [xmin, xmax] (values must be between -30.05 and 65.05)
-    """
-    print('\nDownload yearly WaPOR precipitation data for the period %s till %s' %(Startdate, Enddate))
 
-    # Download data
-    WaPOR.API.version=version
-    catalog=WaPOR.API.getCatalog()
-    bbox=[lonlim[0],latlim[0],lonlim[1],latlim[1]]
-    cube_code='L1_PCP_A'
+def _parse_date_from_code(code):
+    """Extract a date object from a WaPOR v3 raster code."""
+    token = code.split('.')[-1]
+    token = token.replace("A", "")
+
+    for fmt in ("%Y-%m-%d", "%Y-%m", "%Y"):
+        try:
+            dt = datetime.strptime(token, fmt)
+            return date(dt.year, 1, 1)  # yearly → always Jan 1
+        except:
+            continue
+    return None
+
+
+def main(
+    Dir,
+    Startdate='2010-01-01',
+    Enddate='2023-12-31',
+    latlim=[-40, 40],
+    lonlim=[30, 45],
+    version=3,
+    Waitbar=1
+):
+    print(f"\nDownloading WaPOR v3 Yearly Precipitation (L1-PCP-A) "
+          f"from {Startdate} to {Enddate}")
+
+    start_dt = datetime.strptime(Startdate, "%Y-%m-%d").date()
+    end_dt = datetime.strptime(Enddate, "%Y-%m-%d").date()
+
+    # Yearly precipitation mapset
+    mapset_code = 'L1-PCP-A'
+    mapset_url = f"{base_url}/{mapset_code}/rasters"
+
+    # Get list of items
     try:
-        cube_info=WaPOR.API.getCubeInfo(cube_code)
-        multiplier=cube_info['measure']['multiplier']
-    except:
-        print('ERROR: Cannot get cube info. Check if WaPOR version has cube L1_PCP_M')
+        all_rasters = collect_responses(mapset_url, info=["code", "downloadUrl"])
+    except Exception as e:
+        print("❌ ERROR: Cannot reach WaPOR v3 server.")
+        print(e)
         return None
-    time_range='{0},{1}'.format(Startdate,Enddate)
-    try:
-        df_avail=WaPOR.API.getAvailData(cube_code,time_range=time_range)
-    except:
-        print('ERROR: cannot get list of available data')
+
+    # Filter by date range
+    selected = []
+    for code, url in all_rasters:
+        dt = _parse_date_from_code(code)
+        if dt is None:
+            continue
+        if start_dt <= dt <= end_dt:
+            selected.append((dt, code, url))
+
+    if not selected:
+        print("❌ No yearly rasters in this time range.")
         return None
-    if Waitbar == 1:
-        import WaPOR.WaitbarConsole as WaitbarConsole
-        total_amount = len(df_avail)
-        amount = 0
-        WaitbarConsole.printWaitBar(amount, total_amount, prefix = 'Progress:', suffix = 'Complete', length = 50)
-    
-    Dir=os.path.join(Dir,cube_code)
-    if not os.path.exists(Dir):
-        os.makedirs(Dir)
-        
-    for index,row in df_avail.iterrows():   
-        download_url=WaPOR.API.getCropRasterURL(bbox,cube_code,
-                                               row['time_code'],
-                                               row['raster_id'],
-                                               WaPOR.API.Token,
-                                               print_job=False)       
-        
-        Date=datetime.strptime(row['YEAR'], '%Y')
-        filename='P_WAPOR.v2.0_mm-year-1_annually_%s.tif' %(Date.strftime('%Y'))
-        outfilename=os.path.join(Dir,filename)       
-        download_file=os.path.join(Dir,'{0}.tif'.format(row['raster_id']))
-        #Download raster file
-        resp=requests.get(download_url) 
-        open(download_file,'wb').write(resp.content) 
-        driver, NDV, xsize, ysize, GeoT, Projection= gis.GetGeoInfo(download_file)
-        Array = gis.OpenAsArray(download_file,nan_values=True)
-        CorrectedArray=Array*multiplier
-        gis.CreateGeoTiff(outfilename,CorrectedArray,
+
+    selected.sort()
+
+    # Output folder
+    out_dir = os.path.join(Dir, mapset_code)
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Bounding box
+    bbox = [lonlim[0], latlim[0], lonlim[1], latlim[1]]
+
+    # Loop
+    for dt, code, url in selected:
+        fname = f"L1-PCP-A_{dt.year}.tif"
+        out_path = os.path.join(out_dir, fname)
+
+        print(f"Downloading year {dt.year}: {code}")
+
+        # Temporary files
+        tmp_raw = os.path.join(out_dir, f"_raw_{dt.year}.tif")
+        tmp_warp = os.path.join(out_dir, f"_warp_{dt.year}.tif")
+
+        try:
+            # Download
+            urllib.request.urlretrieve(url, tmp_raw)
+
+            # Open raw raster
+            src = gdal.Open(tmp_raw)
+            if src is None:
+                print("❌ GDAL could not open downloaded file.")
+                continue
+            gt = src.GetGeoTransform()
+            xmin = gt[0]
+            ymax = gt[3]
+            px = gt[1]
+            py = gt[5]
+            xmax = xmin + src.RasterXSize * px
+            ymin = ymax + src.RasterYSize * py
+            if lonlim[1] < xmin or lonlim[0] > xmax or latlim[1] < ymin or latlim[0] > ymax:
+                print("❌ BBOX outside raster extent — skipping warp for this year.")
+                continue
+
+
+            # Crop
+            warp_opts = gdal.WarpOptions(outputBounds=bbox, dstNodata=-9999,warpMemoryLimit=256, multithread=True)
+            ds = gdal.Warp(tmp_warp, src, options=warp_opts)
+
+            if ds is None:
+                print("❌ gdal.Warp failed for", code)
+                continue
+
+        finally:
+            if os.path.exists(tmp_raw):
+                os.remove(tmp_raw)
+
+        # Read, scale, save
+        driver, NDV, xsize, ysize, GeoT, Projection = gis.GetGeoInfo(tmp_warp)
+        arr = gis.OpenAsArray(tmp_warp, nan_values=True)
+
+        arr = np.where(np.isnan(arr), NDV, arr)
+        arr = np.where(arr < 0, 0, arr)
+        arr = arr * SCALE_FACTOR
+
+        gis.CreateGeoTiff(out_path, arr.astype("float32"),
                           driver, NDV, xsize, ysize, GeoT, Projection)
-        os.remove(download_file)        
 
-        if Waitbar == 1:                 
-            amount += 1
-            WaitbarConsole.printWaitBar(amount, total_amount, 
-                                        prefix = 'Progress:', 
-                                        suffix = 'Complete', 
-                                        length = 50)
-    
+        os.remove(tmp_warp)
+
+    print("\n✔ Finished downloading WaPOR v3 Yearly Precipitation (L1-PCP-A)")
+    return out_dir

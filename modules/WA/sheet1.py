@@ -345,13 +345,25 @@ def create_sheet1(basin, period, units, data, output, template=False, number_for
 #    img_out.save(filename=output)
 
     # Get the paths based on the environment variable
+        # Determine Inkscape path
     if os.name == 'posix':
         Path_Inkscape = 'inkscape'
-
     else:
-        WA_env_paths = os.environ["WA_PATHS"].split(';')
-        Inkscape_env_path = WA_env_paths[1]
-        Path_Inkscape = os.path.join(Inkscape_env_path,'inkscape.exe')
+        import shutil
+        wa_paths = os.environ.get('WA_PATHS', '').split(';')
+        inkscape_dir = wa_paths[1] if len(wa_paths) > 1 else None
+        if inkscape_dir and os.path.isfile(os.path.join(inkscape_dir, 'inkscape.exe')):
+            Path_Inkscape = os.path.join(inkscape_dir, 'inkscape.exe')
+        else:
+            Path_Inkscape = shutil.which('inkscape')
+
+    if not Path_Inkscape:
+        raise EnvironmentError(
+            "Could not find inkscape.exe. "
+            "Please install Inkscape or set WA_PATHS correctly."
+        )
+
+
 
     # Export svg to png
     tempout_path = output.replace('.png', '_temporary.svg')
